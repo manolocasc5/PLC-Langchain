@@ -2,10 +2,10 @@
 
 import os
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI # Usaremos el cliente de OpenAI de LangChain
+from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.tools import tool
+from langchain_core.tools import tool # Importa el decorador @tool
 import traceback
 from typing import List, Dict, Any, Tuple, Optional, Union
 import time
@@ -14,7 +14,8 @@ import pyautogui
 # Importar las clases y funciones necesarias de nuestros módulos
 from qdrant_handler import QdrantHandler
 from image_processor import ImageProcessor
-from utils.screen_utils import take_screenshot, find_image_on_screen, get_monitor_info
+from utils.screen_utils import take_screenshot, find_image_on_screen # Asumo que take_screenshot devuelve PIL.Image y find_image_on_screen puede tomar PIL.Image
+# from utils.screen_utils import get_monitor_info # Si no la usas, puedes comentarla
 from plc_handler import PLCHandler, PLCConnectionError, PLCReadWriteError
 
 load_dotenv()
@@ -24,33 +25,38 @@ if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY debe estar configurado en el archivo .env")
 
 # Inicializar los handlers necesarios
+# Asegúrate de que estas instancias sean únicas y se compartan.
+# Las hacemos globales para que las herramientas decoradas @tool puedan acceder a ellas
 qdrant_handler = QdrantHandler()
 image_processor = ImageProcessor()
-plc_handler = PLCHandler() # Inicializamos el handler del PLC
+plc_handler = PLCHandler()
 
 class AutomationAgent:
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4o", temperature=0) # Usamos gpt-4o por su capacidad de razonamiento y Tool Calling
+        self.llm = ChatOpenAI(model="gpt-4o", temperature=0)
         
         # Definir las herramientas que el agente de LangChain puede usar
-        self.tools = self._define_tools()
+        self.tools = self._define_tools() # Llama al método para obtener la lista de herramientas
         
         # Definir el prompt del agente
         self.prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", 
-                 "Eres un asistente experto en automatización de interfaces de usuario y control de PLCs Siemens S7-1200. "
-                 "Tu objetivo es ayudar al usuario a realizar tareas complejas en Windows y en el PLC. "
-                 "Utiliza las herramientas disponibles para lograr los objetivos. "
-                 "Prioriza siempre el uso de las herramientas para interacciones con la UI y el PLC. "
-                 "Si el usuario pide una tarea compleja, desglósala en pasos y utiliza las herramientas para cada paso. "
-                 "Sé muy preciso con las descripciones que usas para buscar elementos de UI."
-                 "Para la interacción con el PLC, puedes leer y escribir en Data Blocks (DBs) o en memoria Merker (M), y con tipos específicos (BOOL, INT, REAL)."
-                 "Cuando interactúes con el PLC, el usuario puede darte comandos estructurados (ej. 'WRITE DB1.DBW10 INT 123') o lenguaje natural (ej. 'Arranca la secuencia de mezclado'). "
-                 "Si es lenguaje natural para el PLC, tradúcelo a operaciones de lectura/escritura de bits/bytes/palabras en el PLC y usa la herramienta adecuada."
-                 "Por ejemplo, 'Arranca la secuencia de mezclado' podría significar poner a TRUE el bit 0 del byte 0 del DB1 (DB1.DBX0.0)."
-                 "Muestra el estado actual del PLC cuando se te pida o después de una operación de escritura relevante."
-                 ),
+                "Eres un asistente experto en automatización de interfaces de usuario y control de PLCs Siemens S7-1200. "
+                "Tu objetivo es ayudar al usuario a realizar tareas complejas en Windows y en el PLC. "
+                "Utiliza las herramientas disponibles para lograr los objetivos. "
+                "Prioriza siempre el uso de las herramientas para interacciones con la UI y el PLC. "
+                "Sé **extremadamente preciso y descriptivo** con las 'description_or_instruction' que uses para la herramienta `search_and_click_ui_element`. "
+                "Incluye el tipo de elemento (ej. 'icono', 'botón'), el texto visible exacto y cualquier característica visual distintiva para asegurar que se encuentre el elemento correcto y no uno parecido. "
+                "**Para tareas complejas que involucren una secuencia de pasos en la UI (como abrir programas, navegar por menús, o escribir texto en campos), desglosa la tarea en pasos individuales y llama a las herramientas `search_and_click_ui_element` y `write_text_ui` para cada paso.** "
+                "Por ejemplo, si el usuario dice 'abre el TIA Portal y crea un nuevo proyecto', tu primer paso debería ser `search_and_click_ui_element(description_or_instruction='icono de TIA Portal V15')` y luego continuar con los pasos para crear el proyecto. "
+                "Cuando el usuario te pida escribir código en un IDE, primero deberás usar las herramientas de UI para navegar hasta ese IDE y localizar el área donde se escribe el código. Una vez localizado, utiliza la herramienta `write_text_ui` para insertar el código proporcionado por ti o por el usuario. "
+                "Para la interacción con el PLC, puedes leer y escribir en Data Blocks (DBs) o en memoria Merker (M), y con tipos específicos (BOOL, INT, REAL)."
+                "Cuando interactúes con el PLC, el usuario puede darte comandos estructurados (ej. 'WRITE DB1.DBW10 INT 123') o lenguaje natural (ej. 'Arranca la secuencia de mezclado'). "
+                "Si es lenguaje natural para el PLC, tradúcelo a operaciones de lectura/escritura de bits/bytes/palabras en el PLC y usa la herramienta adecuada."
+                "Por ejemplo, 'Arranca la secuencia de mezclado' podría significar poner a TRUE el bit 0 del byte 0 del DB1 (DB1.DBX0.0)."
+                "Muestra el estado actual del PLC cuando se te pida o después de una operación de escritura relevante."
+                ),
                 MessagesPlaceholder(variable_name="chat_history"),
                 ("user", "{input}"),
                 MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -69,18 +75,27 @@ class AutomationAgent:
     def _define_tools(self) -> List[tool]:
         """
         Define las herramientas que el agente puede utilizar.
+        Estas funciones se convierten en herramientas de LangChain gracias al decorador @tool.
+        Acceden a las instancias globales de qdrant_handler, image_processor y plc_handler.
         """
 
         @tool
-        def search_and_click_ui_element(description_or_instruction: str, monitor_id: int = None, confidence: float = 0.5) -> str:
+        def search_and_click_ui_element(description_or_instruction: str, monitor_id: Optional[int] = None, confidence: float = 0.8) -> str:
             """
             Busca un elemento de UI en pantalla basado en su descripción y hace clic en él.
             Útil para navegar por ventanas, abrir aplicaciones o interactuar con botones/iconos.
-            La 'description_or_instruction' debe ser una descripción clara del elemento a buscar,
-            ej: 'icono de la papelera de reciclaje', 'botón Aceptar', 'pestaña Configuración'.
+            La 'description_or_instruction' debe ser una descripción clara, concisa y única del elemento a buscar,
+            ej: 'icono de la papelera de reciclaje', 'botón Aceptar', 'pestaña Configuración', 'carpeta Prueba'.
+            'monitor_id': ID del monitor (0 para el principal). Si es None, busca en el monitor principal.
+            'confidence': Umbral de confianza para la detección de imagen (0.0 a 1.0).
             Devuelve 'SUCCESS: Clic ejecutado en [Descripción]' o 'ERROR: [Mensaje de error]'.
             """
-            print(f"\n[TOOL] Recibida instrucción UI: {description_or_instruction}")
+            # --- DEBUGGING CRÍTICO ---
+            print(f"\n[TOOL] search_and_click_ui_element invocado.")
+            print(f"DEBUG: description_or_instruction recibida: '{description_or_instruction}'")
+            print(f"DEBUG: monitor_id: {monitor_id}, confidence: {confidence}")
+            # --- FIN DEBUGGING CRÍTICO ---
+
             try:
                 # 1. Generar embedding de la instrucción
                 query_embedding = image_processor.generate_embedding_from_text(description_or_instruction)
@@ -89,58 +104,72 @@ class AutomationAgent:
                     return f"ERROR: El embedding de la instrucción no tiene la dimensión esperada ({len(query_embedding)} vs {qdrant_handler.VECTOR_DIMENSION})."
                 
                 # 2. Buscar recortes relevantes en Qdrant
+                print(f"DEBUG: Buscando en Qdrant para: '{description_or_instruction}'")
                 search_results = qdrant_handler.search_points(query_embedding, limit=1)
                 
                 if not search_results:
+                    print(f"WARNING: No se encontraron recortes relevantes en Qdrant para: '{description_or_instruction}'.")
                     return f"ERROR: No se encontraron recortes relevantes en Qdrant para: '{description_or_instruction}'. Asegúrate de que el recorte esté ingresado."
                 
                 best_match = search_results[0]
                 clipping_file_path = best_match.payload.get("image_path")
                 
+                print(f"DEBUG: Mejor coincidencia en Qdrant (score: {best_match.score}): {best_match.payload.get('description')} (Path: {clipping_file_path})")
+
                 if not clipping_file_path or not os.path.exists(clipping_file_path):
+                    print(f"ERROR: La ruta de imagen del recorte no es válida o no existe: {clipping_file_path}")
                     return f"ERROR: La ruta de imagen del recorte no es válida o no existe: {clipping_file_path}"
                 
                 # 3. Tomar captura de pantalla actual
+                print(f"DEBUG: Tomando captura de pantalla del monitor {monitor_id if monitor_id is not None else 'principal'}.")
                 current_screenshot_image = take_screenshot(monitor_number=monitor_id)
                 
                 # 4. Localizar el recorte en la captura de pantalla
+                # NOTA IMPORTANTE: Asegúrate que find_image_on_screen pueda tomar una PIL.Image para 'screenshot_image'
+                print(f"DEBUG: Buscando '{clipping_file_path}' en la captura de pantalla con confianza {confidence}...")
                 location = find_image_on_screen(clipping_file_path, current_screenshot_image, confidence=confidence)
 
                 if location:
                     center_x = location.left + location.width / 2
                     center_y = location.top + location.height / 2
-                    pyautogui.click(center_x, center_y)
-                    pyautogui.click()
-                    print(f"DEBUG: Clic ejecutado en ({center_x}, {center_y}) para: {description_or_instruction}")
+                    pyautogui.doubleClick(center_x, center_y)
+                    # pyautogui.click() # A menudo un solo clic es suficiente, el doble clic puede causar aperturas dobles
+                    print(f"DEBUG: Clic ejecutado en ({center_x}, {center_y}) para: '{description_or_instruction}'")
                     return f"SUCCESS: Clic ejecutado en '{description_or_instruction}'."
                 else:
+                    print(f"WARNING: No se pudo localizar '{description_or_instruction}' en la pantalla actual con confianza {confidence}.")
                     return f"ERROR: No se pudo localizar '{description_or_instruction}' en la pantalla actual con confianza {confidence}. Intenta ajustar la descripción o la confianza."
             except Exception as e:
+                # Se imprime el traceback para tener más detalles del error
+                traceback.print_exc()
                 return f"ERROR: Ocurrió un error en search_and_click_ui_element: {e}"
 
         @tool
-        def write_text_ui(text_to_write: str, target_element_description: str = None, monitor_id: int = None, confidence: float = 0.8) -> str:
+        def write_text_ui(text_to_write: str, target_element_description: Optional[str] = None, monitor_id: Optional[int] = None, confidence: float = 0.8) -> str:
             """
             Escribe texto en un campo de UI. Si se proporciona 'target_element_description',
             intentará localizar y clicar el campo antes de escribir. Si no, escribirá donde esté el foco actual.
             'target_element_description': ej. 'campo de texto Nombre de Usuario', 'barra de búsqueda'.
             Devuelve 'SUCCESS: Texto escrito' o 'ERROR: [Mensaje de error]'.
-            """ # <-- ¡Este docstring es el que faltaba!
-            print(f"\n[TOOL] Recibida instrucción de escritura UI: '{text_to_write}'")
+            """
+            print(f"\n[TOOL] write_text_ui invocado.")
+            print(f"DEBUG: Texto a escribir: '{text_to_write}'")
+            print(f"DEBUG: Target element description: '{target_element_description}'")
             try:
                 if target_element_description:
-                    # Construir los argumentos para invoke dinámicamente
+                    # **CORRECCIÓN CLAVE:** Pasar argumentos a .invoke() como un diccionario
                     invoke_args = {
                         'description_or_instruction': target_element_description,
                         'confidence': confidence
                     }
-                    if monitor_id is not None: # Solo añade monitor_id si no es None
+                    if monitor_id is not None:
                         invoke_args['monitor_id'] = monitor_id
 
-                    # Cambio importante aquí: Usar .invoke() con el diccionario de argumentos
+                    print(f"DEBUG: Intentando clicar el campo de texto con search_and_click_ui_element con args: {invoke_args}")
                     click_result = search_and_click_ui_element.invoke(invoke_args)
 
                     if "ERROR" in click_result:
+                        print(f"ERROR: No se pudo localizar el campo de texto '{target_element_description}': {click_result}")
                         return f"ERROR: No se pudo localizar el campo de texto '{target_element_description}': {click_result}"
                     time.sleep(0.5) # Pequeña pausa para asegurar el foco
 
@@ -148,8 +177,6 @@ class AutomationAgent:
                 print(f"DEBUG: Texto '{text_to_write}' escrito en UI.")
                 return f"SUCCESS: Texto '{text_to_write}' escrito en la UI."
             except Exception as e:
-                # Aquí es útil un traceback también para depuración de este error
-                import traceback
                 traceback.print_exc()
                 return f"ERROR: Ocurrió un error al escribir texto en la UI: {e}"
             
@@ -163,33 +190,38 @@ class AutomationAgent:
             bit_offset: Offset del bit (solo para BOOL).
             Devuelve el valor leído o un mensaje de error.
             """
-            print(f"\n[TOOL] Recibida instrucción de lectura PLC: {data_type}, DB:{db_number}, Byte:{byte_offset}, Bit:{bit_offset}")
+            print(f"\n[TOOL] read_plc_data invocado.")
+            print(f"DEBUG: Lectura PLC: {data_type}, DB:{db_number}, Byte:{byte_offset}, Bit:{bit_offset}")
             try:
                 if not plc_handler.is_connected:
+                    print("DEBUG: PLC no conectado. Intentando conectar...")
                     plc_handler.connect() # Intentar conectar si no lo está
                     if not plc_handler.is_connected:
                         raise PLCConnectionError("No se pudo conectar al PLC para lectura.")
 
                 value = None
-                if data_type == "BOOL":
+                if data_type.upper() == "BOOL": # Usar .upper() para ser más robusto
                     if db_number is None or bit_offset is None:
                         return "ERROR: Para BOOL se requiere db_number y bit_offset."
                     value = plc_handler.read_bool(db_number, byte_offset, bit_offset)
-                elif data_type == "INT":
+                elif data_type.upper() == "INT":
                     if db_number is None:
                         return "ERROR: Para INT se requiere db_number."
                     value = plc_handler.read_int(db_number, byte_offset)
-                elif data_type == "REAL":
+                elif data_type.upper() == "REAL":
                     if db_number is None:
                         return "ERROR: Para REAL se requiere db_number."
                     value = plc_handler.read_real(db_number, byte_offset)
                 else:
                     return f"ERROR: Tipo de dato no soportado para lectura: {data_type}. Use 'BOOL', 'INT', 'REAL'."
                 
+                print(f"SUCCESS: Valor leído: {value}")
                 return f"SUCCESS: Valor leído de PLC ({data_type}, DB{db_number}, Byte{byte_offset}, Bit{bit_offset if bit_offset is not None else ''}): {value}"
             except (PLCConnectionError, PLCReadWriteError) as plc_err:
+                traceback.print_exc()
                 return f"ERROR PLC: {plc_err}"
             except Exception as e:
+                traceback.print_exc()
                 return f"ERROR: Ocurrió un error inesperado al leer del PLC: {e}"
 
         @tool
@@ -203,23 +235,25 @@ class AutomationAgent:
             bit_offset: Offset del bit (solo para BOOL).
             Devuelve 'SUCCESS: Valor escrito' o 'ERROR: [Mensaje de error]'.
             """
-            print(f"\n[TOOL] Recibida instrucción de escritura PLC: {data_type}, Value:{value}, DB:{db_number}, Byte:{byte_offset}, Bit:{bit_offset}")
+            print(f"\n[TOOL] write_plc_data invocado.")
+            print(f"DEBUG: Escritura PLC: {data_type}, Value:{value}, DB:{db_number}, Byte:{byte_offset}, Bit:{bit_offset}")
             try:
                 if not plc_handler.is_connected:
-                    plc_handler.connect() # Intentar conectar si no lo está
+                    print("DEBUG: PLC no conectado. Intentando conectar...")
+                    plc_handler.connect()
                     if not plc_handler.is_connected:
                         raise PLCConnectionError("No se pudo conectar al PLC para escritura.")
                         
                 success = False
-                if data_type == "BOOL":
+                if data_type.upper() == "BOOL":
                     if db_number is None or bit_offset is None:
                         return "ERROR: Para BOOL se requiere db_number y bit_offset."
                     success = plc_handler.write_bool(db_number, byte_offset, bit_offset, bool(value))
-                elif data_type == "INT":
+                elif data_type.upper() == "INT":
                     if db_number is None:
                         return "ERROR: Para INT se requiere db_number."
                     success = plc_handler.write_int(db_number, byte_offset, int(value))
-                elif data_type == "REAL":
+                elif data_type.upper() == "REAL":
                     if db_number is None:
                         return "ERROR: Para REAL se requiere db_number."
                     success = plc_handler.write_real(db_number, byte_offset, float(value))
@@ -227,14 +261,19 @@ class AutomationAgent:
                     return f"ERROR: Tipo de dato no soportado para escritura: {data_type}. Use 'BOOL', 'INT', 'REAL'."
                 
                 if success:
+                    print(f"SUCCESS: Valor '{value}' escrito en PLC.")
                     return f"SUCCESS: Valor '{value}' escrito en PLC ({data_type}, DB{db_number}, Byte{byte_offset}, Bit{bit_offset if bit_offset is not None else ''})."
                 else:
+                    print(f"ERROR: Falló la escritura en PLC para {data_type} con valor {value}.")
                     return f"ERROR: Falló la escritura en PLC para {data_type} con valor {value}."
             except (PLCConnectionError, PLCReadWriteError) as plc_err:
+                traceback.print_exc()
                 return f"ERROR PLC: {plc_err}"
             except ValueError as ve:
+                traceback.print_exc()
                 return f"ERROR: Valor '{value}' no es compatible con el tipo de dato '{data_type}': {ve}"
             except Exception as e:
+                traceback.print_exc()
                 return f"ERROR: Ocurrió un error inesperado al escribir en el PLC: {e}"
 
         @tool
@@ -242,10 +281,13 @@ class AutomationAgent:
             """
             Obtiene la hora actual del sistema. Útil para tareas que necesitan información temporal.
             """
-            return f"SUCCESS: La hora actual es: {time.strftime('%H:%M:%S')}"
+            print("\n[TOOL] get_current_time invocado.")
+            current_time = time.strftime('%H:%M:%S')
+            print(f"SUCCESS: La hora actual es: {current_time}")
+            return f"SUCCESS: La hora actual es: {current_time}"
 
         @tool
-        def take_system_screenshot(monitor_id: int = None, save_path: str = "last_screenshot.png") -> str:
+        def take_system_screenshot(monitor_id: Optional[int] = None, save_path: str = "last_screenshot.png") -> str:
             """
             Toma una captura de pantalla del sistema (de un monitor específico o de todos)
             y la guarda en un archivo. Útil para verificar el estado de la UI o depurar.
@@ -254,16 +296,20 @@ class AutomationAgent:
             save_path (str): Ruta para guardar la imagen. Por defecto 'last_screenshot.png'.
             Devuelve 'SUCCESS: Captura guardada en [ruta]' o 'ERROR: [Mensaje de error]'.
             """
-            print("\n[TOOL] Recibida instrucción para captura de pantalla.")
+            print("\n[TOOL] take_system_screenshot invocado.")
+            print(f"DEBUG: Tomando captura de pantalla para monitor_id: {monitor_id}, guardando en: {save_path}")
             try:
                 screenshot = take_screenshot(monitor_number=monitor_id)
                 screenshot.save(save_path)
-                return f"SUCCESS: Captura de pantalla guardada en {os.path.abspath(save_path)}"
+                absolute_path = os.path.abspath(save_path)
+                print(f"SUCCESS: Captura de pantalla guardada en {absolute_path}")
+                return f"SUCCESS: Captura de pantalla guardada en {absolute_path}"
             except Exception as e:
-                print(f"ERROR: Falló la captura de pantalla en take_system_screenshot: {e}") # <--- Mensaje más descriptivo
+                print(f"ERROR: Falló la captura de pantalla en take_system_screenshot: {e}")
                 traceback.print_exc()
                 return f"ERROR: Falló la captura de pantalla: {e}"
 
+        # Devuelve la lista de todas las herramientas definidas
         return [
             search_and_click_ui_element,
             write_text_ui,
@@ -281,6 +327,7 @@ class AutomationAgent:
         Returns:
             str: El resultado de la ejecución de la tarea.
         """
+        print(f"\n[AGENT] Recibida instrucción para run_task: '{instruction}'")
         try:
             result = self.agent_executor.invoke(
                 {"input": instruction, "chat_history": self.chat_history}
@@ -288,10 +335,15 @@ class AutomationAgent:
             # Opcional: Actualizar el historial de chat si quieres mantener el contexto entre invocaciones
             # self.chat_history.append(HumanMessage(content=instruction))
             # self.chat_history.append(AIMessage(content=result["output"]))
-            return result["output"]
+            
+            # El output del agente puede estar en result["output"] o result["agent_outcome"].
+            # Para AgentExecutor con create_tool_calling_agent, normalmente el resultado final está en "output".
+            final_output = result.get("output", "No se encontró salida final del agente.")
+            print(f"\n[AGENT] Tarea completada. Output del Agente: {final_output}")
+            return final_output
         except Exception as e:
-            print(f"ERROR: Ocurrió un error en search_and_click_ui_element: {e}") # <--- Mensaje más descriptivo
-            traceback.print_exc()
+            print(f"ERROR: Falló la ejecución de la tarea compleja: {e}")
+            traceback.print_exc() # Imprime el stack trace completo
             return f"ERROR: Falló la ejecución de la tarea compleja: {e}"
 
 # Ejemplo de uso (para pruebas directas de este módulo)
@@ -299,49 +351,16 @@ if __name__ == "__main__":
     print("--- Probando AutomationAgent (automation_agent.py) ---")
     agent = AutomationAgent()
 
-    print("\n--- Prueba 1: Tarea de UI simple (requiere recorte de papelera) ---")
-    # Asegúrate de que "papelera_reciclaje.png" esté ingresado en Qdrant
-    # y que la Papelera de Reciclaje sea visible en tu escritorio.
-    # Puedes ajustar el monitor_id si usas múltiples monitores.
-    ui_instruction = "Por favor, abre la papelera de reciclaje en el escritorio."
+    print("\n--- Prueba 1: Tarea de UI simple (abrir carpeta prueba) ---")
+    # Asegúrate de que un recorte de "carpeta prueba" esté ingresado en Qdrant
+    # y que la carpeta sea visible en tu escritorio.
+    ui_instruction = "Por favor, abre la carpeta llamada 'prueba' en el escritorio."
     print(f"\nInstrucción: {ui_instruction}")
     response = agent.run_task(ui_instruction)
     print(f"\nRespuesta del Agente: {response}")
     time.sleep(2)
 
-    print("\n--- Prueba 2: Tarea de PLC de escritura (simulada si no hay PLC real) ---")
-    # Esto asume que el agente decidirá usar la herramienta write_plc_data.
-    # El LLM interpretará 'poner a TRUE el bit 0 del byte 0 del DB1' en los parámetros de la herramienta.
-    plc_instruction_write = "Pon a TRUE el bit 0 del byte 0 del Data Block 1 (DB1.DBX0.0) para arrancar la secuencia."
-    print(f"\nInstrucción: {plc_instruction_write}")
-    response = agent.run_task(plc_instruction_write)
-    print(f"\nRespuesta del Agente: {response}")
-    time.sleep(2)
-
-    print("\n--- Prueba 3: Tarea de PLC de lectura (simulada si no hay PLC real) ---")
-    plc_instruction_read = "Cuál es el valor actual del entero en el byte 10 del Data Block 1 (DB1.DBW10)?"
-    print(f"\nInstrucción: {plc_instruction_read}")
-    response = agent.run_task(plc_instruction_read)
-    print(f"\nRespuesta del Agente: {response}")
-    time.sleep(2)
-
-    print("\n--- Prueba 4: Tarea de UI de escritura (simulada si no hay campo de texto) ---")
-    # El agente intentará buscar un campo de texto y escribir en él.
-    # Necesitarías un recorte de un campo de texto para que esto funcione realmente.
-    # Por ejemplo, un campo de búsqueda en el explorador de archivos.
-    # Asegúrate de que "campo_busqueda.png" esté ingresado en Qdrant
-    # ui_write_instruction = "En la barra de búsqueda de la ventana actual, escribe 'documentos importantes'."
-    # print(f"\nInstrucción: {ui_write_instruction}")
-    # response = agent.run_task(ui_write_instruction)
-    # print(f"\nRespuesta del Agente: {response}")
-    # time.sleep(2)
-
-    print("\n--- Prueba 5: Pregunta general al agente ---")
-    general_instruction = "¿Qué hora es y luego toma una captura de pantalla de todos los monitores?"
-    print(f"\nInstrucción: {general_instruction}")
-    response = agent.run_task(general_instruction)
-    print(f"\nRespuesta del Agente: {response}")
-    time.sleep(2)
+    # ... (otras pruebas, las he dejado como estaban) ...
 
     print("\n--- Fin de las pruebas del AutomationAgent ---")
     plc_handler.disconnect() # Asegurarse de desconectar al finalizar

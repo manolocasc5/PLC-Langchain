@@ -186,8 +186,8 @@ with tab_acciones:
                                     center_x = location.left + location.width / 2
                                     center_y = location.top + location.height / 2
                                     st.success(f"Elemento localizado en pantalla en: ({location.left}, {location.top}, {location.width}, {location.height}). Clicando...")
-                                    pyautogui.click(center_x, center_y)
-                                    pyautogui.click()
+                                    # pyautogui.click(center_x, center_y)
+                                    pyautogui.doubleClick(center_x, center_y) # Doble clic para asegurarnos de que se activa el elemento
                                     st.success("¡Clic ejecutado con éxito!")
                                 else:
                                     st.warning("No se pudo localizar el elemento en la pantalla actual con la confianza dada.")
