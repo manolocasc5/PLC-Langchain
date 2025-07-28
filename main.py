@@ -30,10 +30,10 @@ def process_and_store_clipping(clipping_image_path: str):
         return None
 
     try:
-        # 1. Obtener descripción, palabras clave y tipo de elemento con Gemini
+        # 1. Obtener descripción, palabras clave y tipo de elemento con Open AI
         description, keywords, element_type = image_processor.describe_image_with_ai(clipping_image_path)
         if not description:
-            print("No se pudo generar una descripción con Gemini. Abortando.")
+            print("No se pudo generar una descripción con Open AI. Abortando.")
             return None
 
         # 2. Generar embedding de la descripción
@@ -51,7 +51,7 @@ def process_and_store_clipping(clipping_image_path: str):
         # 5. Preparar payload para Qdrant
         payload = {
             "image_id": point_id, # Usar el ID como identificador de imagen
-            "image_path": os.path.abspath(final_clipping_path), # Ruta absoluta para referencia
+            "image_path": final_clipping_path, # Ruta absoluta para referencia
             "description": description,
             "keywords": keywords,
             "type": element_type,
@@ -128,7 +128,8 @@ def execute_action_from_text(instruction: str, monitor_to_capture: int = None, c
             center_y = location.top + location.height / 2
             
             print(f"Recorte localizado en pantalla en: {location}. Clicando en ({center_x}, {center_y})...")
-            pyautogui.click(center_x, center_y)
+            pyautogui.doubleClick(center_x, center_y)
+            pyautogui.click(center_x, center_y)  # Doble clic para asegurarse
             print("Clic ejecutado.")
             return True
         else:
@@ -188,5 +189,5 @@ if __name__ == "__main__":
         print(f"Falló la acción para '{instruction_2}' (esperado si no hay recorte de 'cerrar ventana de Chrome').")
 
     print("\n--- Sistema de automatización de UI finalizado para esta ejecución ---")
-    print("Para instrucciones más complejas que requieran múltiples pasos, necesitaríamos implementar LangChain y un planificador con Gemini.")
+    print("Para instrucciones más complejas que requieran múltiples pasos, necesitaríamos implementar LangChain y un planificador con Open AI.")
     print("Para la parte de PLC, se integraría una librería como python-snap7.")

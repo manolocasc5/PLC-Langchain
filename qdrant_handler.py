@@ -6,7 +6,7 @@ load_dotenv()
 
 QDRANT_HOST = os.getenv("QDRANT_HOST")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-COLLECTION_NAME = "windows_ui_elements"
+COLLECTION_NAME = "windows_ui_elements_test"
 # VECTOR_DIMENSION = 384 # Ya no es una variable global aquí, será un atributo de instancia
 
 class QdrantHandler:
