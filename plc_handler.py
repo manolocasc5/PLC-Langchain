@@ -2,24 +2,31 @@ import os
 from dotenv import load_dotenv
 from typing import Any, Dict, List, Optional, Union
 import time # Añadir import de time para las pausas en el ejemplo
+import sys # Para manejar la salida de errores de importación
 
 # Importar la librería Snap7. Si aún no la tienes instalada:
 # pip install python-snap7
 
-S7Client = None
+_S7Client_actual = None # Para mantener la referencia a la clase S7Client real
+_S7Util_actual = None # Para mantener la referencia al módulo S7Util real
 Snap7Exception = Exception # Default a Exception si no se puede importar Snap7Exception
+
 try:
-    import snap7.client as S7Client
-    import snap7.util as S7Util
+    import snap7.client
+    import snap7.util
     from snap7.snap7exceptions import Snap7Exception as ActualSnap7Exception
+
+    _S7Client_actual = snap7.client # Asignar el módulo cliente
+    _S7Util_actual = snap7.util # Asignar el módulo util
     Snap7Exception = ActualSnap7Exception # Asignar la excepción real si se importa correctamente
-    print("python-snap7 importado correctamente.")
+    print("DEBUG: python-snap7 importado correctamente.")
 except ImportError:
     print("Advertencia: python-snap7 no está instalado. Las funciones del PLC estarán simuladas.")
+    # Si no se importa, _S7Client_actual y _S7Util_actual se mantienen None
 except Exception as e:
-    print(f"Advertencia: Error al importar snap7 o Snap7Exception: {e}. Las funciones del PLC estarán simuladas.")
-    # Asegurarse de que S7Client permanezca None si hay un problema al importar cualquier parte de snap7
-    S7Client = None
+    print(f"Advertencia: Error inesperado al importar snap7: {e}. Las funciones del PLC estarán simuladas.")
+    print(f"DEBUG: Detalle del error de importación: {sys.exc_info()[0].__name__}: {sys.exc_info()[1]}")
+    # Si hay un error al importar, _S7Client_actual y _S7Util_actual se mantienen None
 
 
 load_dotenv()
@@ -59,21 +66,21 @@ class PLCHandler:
             print("Ya conectado al PLC.")
             return True
         
-        # Si S7Client es None, significa que python-snap7 no se importó correctamente,
+        # Si _S7Client_actual es None, significa que python-snap7 no se importó correctamente,
         # así que simulamos la conexión.
-        if S7Client is None or not PLC_IP_ADDRESS:
+        if _S7Client_actual is None or not PLC_IP_ADDRESS:
             print("Simulando conexión al PLC (python-snap7 no disponible o IP no configurada)...")
             self.is_connected = True # Simular conexión exitosa
             return True
 
         try:
-            self.client = S7Client.Client()
+            self.client = _S7Client_actual.Client() # Usar la referencia real al cliente
             self.client.connect(PLC_IP_ADDRESS, PLC_RACK, PLC_SLOT)
             self.is_connected = self.client.get_connected()
             if self.is_connected:
                 print(f"Conectado al PLC en {PLC_IP_ADDRESS} (Rack: {PLC_RACK}, Slot: {PLC_SLOT})")
             else:
-                print(f"No se pudo conectar al PLC en {PLC_IP_ADDRESS}.")
+                print(f"No se pudo conectar al PLC en {PLC_IP_ADDRESS}. Verifique la configuración y la red.")
                 self.client.destroy()
                 self.client = None
                 raise PLCConnectionError(f"No se pudo establecer conexión con el PLC en {PLC_IP_ADDRESS}.")
@@ -92,24 +99,38 @@ class PLCHandler:
     def disconnect(self):
         """Desconecta del PLC."""
         if self.is_connected and self.client:
-            if S7Client is None: # Simulación
+            if _S7Client_actual is None: # Si estamos en modo simulación
                 print("Simulando desconexión del PLC...")
-            else:
-                self.client.disconnect()
-                self.client.destroy()
-                print("Desconectado del PLC.")
+            else: # Conexión real
+                try:
+                    self.client.disconnect()
+                    self.client.destroy()
+                    print("Desconectado del PLC.")
+                except Exception as e:
+                    print(f"Advertencia: Error al desconectar del PLC: {e}")
             self.is_connected = False
-            self.client = None
-        elif self.is_connected: # Caso simulado
-            print("Simulando desconexión del PLC (ya estaba 'conectado').")
+            self.client = None # Asegurar que self.client sea None después de desconectar
+        elif self.is_connected: # Caso simulado pero self.client ya era None
+            print("Simulando desconexión del PLC (ya estaba 'conectado' pero sin cliente real).")
             self.is_connected = False
+            self.client = None # Asegurar que self.client sea None
         else:
             print("No conectado al PLC.")
 
     def _ensure_connection(self):
-        # Intentar conectar si no lo está. Si falla, lanzar una excepción.
-        if not self.is_connected and not self.connect():
-            raise PLCConnectionError("No hay conexión con el PLC. Falló el intento de reconexión.")
+        """
+        Garantiza que haya una conexión activa con el PLC. Intenta reconectar si es necesario.
+        Lanza PLCConnectionError si no se puede establecer la conexión.
+        """
+        # Si no estamos conectados, intentar conectar.
+        # connect() devuelve True si logra conectar (real o simulado).
+        # Si devuelve False (falla la conexión real y no hay simulación), entonces lanzamos error.
+        if not self.is_connected:
+            print("DEBUG: Intentando asegurar conexión al PLC...")
+            if not self.connect():
+                raise PLCConnectionError("No hay conexión con el PLC. Falló el intento de reconexión.")
+            print("DEBUG: Conexión al PLC asegurada (o simulada).")
+
 
     def read_db(self, db_number: int, start_byte: int, size: int) -> bytearray:
         """
@@ -122,7 +143,7 @@ class PLCHandler:
             bytearray: Los datos leídos.
         """
         self._ensure_connection() # Esto ahora maneja la conexión/reconexión
-        if S7Client is None or not self.client or not self.is_connected:
+        if _S7Client_actual is None or not self.client or not self.is_connected:
             print(f"Simulando lectura de DB{db_number}, StartByte: {start_byte}, Size: {size}")
             # Retorna un bytearray simulado (ej. todos ceros)
             return bytearray([0] * size)
@@ -147,7 +168,7 @@ class PLCHandler:
             bool: True si la escritura fue exitosa, False en caso contrario.
         """
         self._ensure_connection() # Esto ahora maneja la conexión/reconexión
-        if S7Client is None or not self.client or not self.is_connected:
+        if _S7Client_actual is None or not self.client or not self.is_connected:
             print(f"Simulando escritura en DB{db_number}, StartByte: {start_byte}, Data: {data.hex()}")
             return True # Simular escritura exitosa
         
@@ -163,7 +184,7 @@ class PLCHandler:
     def read_m(self, start_byte: int, size: int) -> bytearray:
         """Lee datos de la memoria M (Merker) del PLC."""
         self._ensure_connection()
-        if S7Client is None or not self.client or not self.is_connected:
+        if _S7Client_actual is None or not self.client or not self.is_connected:
             print(f"Simulando lectura de M, StartByte: {start_byte}, Size: {size}")
             return bytearray([0] * size) # Simulado
         try:
@@ -177,7 +198,7 @@ class PLCHandler:
     def write_m(self, start_byte: int, data: bytearray) -> bool:
         """Escribe datos en la memoria M (Merker) del PLC."""
         self._ensure_connection()
-        if S7Client is None or not self.client or not self.is_connected:
+        if _S7Client_actual is None or not self.client or not self.is_connected:
             print(f"Simulando escritura en M, StartByte: {start_byte}, Data: {data.hex()}")
             return True # Simulado
         try:
@@ -191,37 +212,44 @@ class PLCHandler:
     # --- Funciones para leer/escribir tipos de datos específicos (usando snap7.util) ---
     def read_real(self, db_number: int, byte_offset: int) -> float:
         data = self.read_db(db_number, byte_offset, 4) # Real es 4 bytes
-        return S7Util.get_real(data, 0) if S7Client else 0.0
+        # Usar _S7Util_actual para acceder a las funciones si snap7 se importó
+        return _S7Util_actual.get_real(data, 0) if _S7Util_actual else 0.0
 
     def write_real(self, db_number: int, byte_offset: int, value: float) -> bool:
         buffer = bytearray(4)
-        if S7Client:
-            S7Util.set_real(buffer, 0, value)
+        if _S7Util_actual: # Solo intentar set_real si S7Util está disponible
+            _S7Util_actual.set_real(buffer, 0, value)
         return self.write_db(db_number, byte_offset, buffer)
 
     def read_int(self, db_number: int, byte_offset: int) -> int:
         data = self.read_db(db_number, byte_offset, 2) # Int es 2 bytes
-        return S7Util.get_int(data, 0) if S7Client else 0
+        # Usar _S7Util_actual para acceder a las funciones si snap7 se importó
+        return _S7Util_actual.get_int(data, 0) if _S7Util_actual else 0
 
     def write_int(self, db_number: int, byte_offset: int, value: int) -> bool:
         buffer = bytearray(2)
-        if S7Client:
-            S7Util.set_int(buffer, 0, value)
+        if _S7Util_actual: # Solo intentar set_int si S7Util está disponible
+            _S7Util_actual.set_int(buffer, 0, value)
         return self.write_db(db_number, byte_offset, buffer)
 
     def read_bool(self, db_number: int, byte_offset: int, bit_offset: int) -> bool:
         data = self.read_db(db_number, byte_offset, 1) # Leer el byte completo
-        return S7Util.get_bool(data, 0, bit_offset) if S7Client else False
+        # Usar _S7Util_actual para acceder a las funciones si snap7 se importó
+        return _S7Util_actual.get_bool(data, 0, bit_offset) if _S7Util_actual else False
 
     def write_bool(self, db_number: int, byte_offset: int, bit_offset: int, value: bool) -> bool:
         # Para escribir un booleano, primero leemos el byte, modificamos el bit y luego escribimos el byte modificado
-        # Asegurarse de que el bytearray tenga al menos 1 byte
         current_byte_data = self.read_db(db_number, byte_offset, 1)
-        if len(current_byte_data) == 0: # Si la lectura simulada o fallida devuelve vacío
-             current_byte_data = bytearray([0]) # Crear un byte nuevo inicializado a 0
         
-        if S7Client:
-            S7Util.set_bool(current_byte_data, 0, bit_offset, value)
+        # Asegurarse de que el bytearray tenga al menos 1 byte.
+        # Si la lectura simulada o fallida devuelve un bytearray vacío, inicializarlo a [0].
+        if len(current_byte_data) == 0:
+            print(f"DEBUG: read_db para DB{db_number}, byte {byte_offset} devolvió un bytearray vacío. Inicializando a [0] para write_bool.")
+            current_byte_data = bytearray([0])
+        
+        if _S7Util_actual: # Solo intentar set_bool si S7Util está disponible
+            _S7Util_actual.set_bool(current_byte_data, 0, bit_offset, value)
+        
         return self.write_db(db_number, byte_offset, current_byte_data)
 
     # Añadir más funciones para otros tipos de datos (DINT, WORD, DWORD, etc.) según sea necesario.
@@ -295,8 +323,8 @@ if __name__ == "__main__":
                 m_data = plc.read_m(m_byte_offset, m_size)
                 print(f"Datos de MW{m_byte_offset}: {m_data.hex()} (bytearray)")
                 # Puedes convertirlo a INT si es una palabra
-                if S7Client:
-                    m_int_value = S7Util.get_int(m_data, 0)
+                if _S7Util_actual: # Asegúrate de que S7Util esté disponible
+                    m_int_value = _S7Util_actual.get_int(m_data, 0)
                     print(f"Valor entero de MW{m_byte_offset}: {m_int_value}")
             except PLCReadWriteError as rw_err:
                 print(f"Error en lectura de M: {rw_err}")

@@ -80,12 +80,13 @@ pyparsing==3.2.3
 pyperclip==1.9.0
 PyRect==0.2.0
 PyScreeze==1.0.1
+pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 python-snap7==1.0
 pytweening==1.2.0
 pytz==2025.2
-# pywin32==311
+pywin32==311
 PyYAML==6.0.2
 qdrant-client==1.15.0
 referencing==0.36.2
